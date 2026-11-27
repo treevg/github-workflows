@@ -1,0 +1,74 @@
+name: 🧪 CI
+
+on:
+  workflow_call:
+    inputs:
+      check_changelog:
+        description: 'Lint CHANGELOG.md modification on pull requests'
+        required: false
+        type: boolean
+        default: true
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  test:
+    name: Test Suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🧪 Run Automated Tests
+        if: hashFiles('.ci/actions/run-tests/action.yml') != ''
+        uses: ./.ci/actions/run-tests
+
+      - name: 🧪 Fallback Test Runner
+        if: hashFiles('.ci/actions/run-tests/action.yml') == '' && hashFiles('tests/run_tests.sh') != ''
+        run: |
+          chmod +x tests/run_tests.sh
+          ./tests/run_tests.sh
+
+  changelog:
+    name: 📝 Lint Changelog (PR)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && (inputs.check_changelog == null || inputs.check_changelog == true)
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔍 Verify CHANGELOG.md was updated
+        run: |
+          # Allow explicit bypass if PR title contains [skip changelog]
+          if echo "${{ github.event.pull_request.title }}" | grep -iq "\[skip changelog\]"; then
+            echo "Skipping changelog check: '[skip changelog]' found in PR title."
+            exit 0
+          fi
+
+          if [ ! -f "CHANGELOG.md" ]; then
+            echo "No CHANGELOG.md found in repository. Skipping check."
+            exit 0
+          fi
+
+          # Ensure base branch ref is available
+          git fetch origin ${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }} || true
+
+          # Check if CHANGELOG.md was modified in this pull request
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^CHANGELOG\.md$"; then
+            echo "✓ CHANGELOG.md has been modified in this pull request."
+          else
+            echo "::error file=CHANGELOG.md::No changes detected in CHANGELOG.md! Please document your changes under '## [unreleased]' (or include '[skip changelog]' in the PR title if exempt)."
+            exit 1
+          fi

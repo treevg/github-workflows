@@ -1,0 +1,141 @@
+name: 🏷️ Release
+
+on:
+  workflow_call:
+    inputs:
+      bump:
+        description: 'SemVer Version Bump (patch, minor, major)'
+        required: true
+        type: string
+        default: 'patch'
+      dry_run:
+        description: 'Dry run (preview release without committing, tagging, or pushing)'
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'SemVer Version Bump'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      dry_run:
+        description: 'Dry run (preview release without committing, tagging, or pushing)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 🚀 Create Release & Tag
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📥 Checkout Framework Tools
+        if: github.repository != 'treevg/github-workflows'
+        uses: actions/checkout@v4
+        with:
+          repository: treevg/github-workflows
+          path: ${{ runner.temp }}/github-workflows
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: 🔧 Locate Release Script
+        id: release_tool
+        run: |
+          if [ -f ".github/scripts/release_version.py" ]; then
+            echo "path=.github/scripts/release_version.py" >> $GITHUB_OUTPUT
+          else
+            echo "path=${{ runner.temp }}/github-workflows/.github/scripts/release_version.py" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 🔢 Determine Version Bump & Update Changelog
+        id: version_bump
+        run: |
+          DRY_RUN_FLAG=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          fi
+          python3 "${{ steps.release_tool.outputs.path }}" ${{ inputs.bump }} $DRY_RUN_FLAG
+
+      - name: 🧪 Run Automated Tests
+        if: hashFiles('.ci/actions/run-tests/action.yml') != ''
+        uses: ./.ci/actions/run-tests
+
+      - name: ✏️ Prepare Release Codebase Changes
+        if: ${{ inputs.dry_run != true && hashFiles('.ci/actions/prepare-release/action.yml') != '' }}
+        uses: ./.ci/actions/prepare-release
+        with:
+          version: ${{ steps.version_bump.outputs.version }}
+          is_prerelease: 'false'
+
+      - name: 🚀 Deploy Production Release
+        if: ${{ inputs.dry_run != true && hashFiles('.ci/actions/deploy/action.yml') != '' }}
+        uses: ./.ci/actions/deploy
+        with:
+          target: production
+          version: ${{ steps.version_bump.outputs.version }}
+
+      - name: 🏷️ Commit, Tag & Push to Main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version_bump.outputs.version }}"
+          if [ -z "$VERSION" ]; then
+            echo "Error: Version not set by version_bump step." >&2
+            exit 1
+          fi
+
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "=== DRY RUN RELEASE PREVIEW ==="
+            echo "Version: v$VERSION"
+            echo "Target:  origin/main"
+            echo "Commit, Tag & Push skipped in dry run."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage modified tracked files (e.g. CHANGELOG.md and any files prepared by prepare-release)
+          git add -u
+          git commit -m "chore(release): v$VERSION"
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+
+          git push origin main
+          git push origin "v$VERSION"
+
+      - name: 📦 Publish GitHub Release
+        if: ${{ inputs.dry_run != true }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version_bump.outputs.version }}"
+          CHANGELOG_NOTES="${{ steps.version_bump.outputs.notes_path }}"
+
+          if [ -f "$CHANGELOG_NOTES" ] && [ -s "$CHANGELOG_NOTES" ]; then
+            gh release create "v$VERSION" \
+              --title "Release v$VERSION" \
+              --notes-file "$CHANGELOG_NOTES"
+          else
+            gh release create "v$VERSION" \
+              --title "Release v$VERSION" \
+              --generate-notes
+          fi
